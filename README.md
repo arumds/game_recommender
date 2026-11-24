@@ -120,16 +120,6 @@ docker run -p 8000:8000 -v "$(pwd)/models:/app/models" steam-reco-api
 ```
 The image installs only `requirements-serve.txt` (no torch). It has not been built in the authoring environment yet.
 
-## Data facts and choices (checked on the real files)
-- 88,310 lines but 70,912 distinct players: duplicate lines are merged (max playtime per player+game).
-- 36% of owned games were never played, so **a positive is playtime >= 120 minutes**.
-- Kept players with >= 10 positives and games with >= 20 positives: 45,791 players, 3,750 games, 1.82M positives.
-- **No timestamps**, so a random 20% of each player's positives is held out instead of a time split. Numbers are
-  more optimistic than a time split would give.
-- Players are split 70/30: the ranker trains on the first group, all results below are on the other 13,738 players.
-- User and item statistics (popularity, taste profile, mean price) come from training positives only.
-- Known leak, small: `user_recent_h` sums last-two-weeks playtime over all games, including held-out ones.
-
 ## Results (one run, seed 0; top-10, 13,738 held-out players; `outputs/results.json`)
 | Model | Recall@10 | NDCG@10 | MAP@10 |
 |---|---|---|---|
