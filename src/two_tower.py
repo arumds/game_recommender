@@ -130,3 +130,17 @@ class TwoTowerRetriever:
             order = np.take_along_axis(scores, top, 1).argsort(1)[:, ::-1]
             out.append(np.take_along_axis(top, order, 1))
         return np.vstack(out)
+
+
+# Entry point for two_tower_proc.vectors_in_subprocess (see there for why this runs in its own process).
+
+if __name__ == "__main__":
+    import sys
+    import pandas as pd
+    with np.load(sys.argv[1]) as d:
+        _train = pd.DataFrame({"u": d["u"], "i": d["i"]})
+        _feats = {k: d[k] for k in ("mh", "price", "year")}
+        _n_users, _n_items = int(d["n_users"]), int(d["n_items"])
+    _model, _, _profiles = train_two_tower(_train, _n_users, _n_items, _feats)
+    _tt = TwoTowerRetriever(_model, _feats, _profiles)
+    np.savez(sys.argv[2], user_vecs=_tt.all_user_vecs(), item_vecs=_tt.item_vecs.numpy())
