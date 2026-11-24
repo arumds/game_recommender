@@ -1,10 +1,10 @@
 """Train and evaluate the whole stack on UCSD Steam, then save the artifacts the API loads.
 
   retrieval: popularity, ALS, two-tower  ->  merge  ->  LightGBM ranker  ->  guardrails
-  plus: churn (recent-inactivity) model, cross-sell examples
+  plus: cross-sell examples
 
 Players are split 70/30: the ranker learns from the first group's held-out games, and every number below is
-measured on the second group, which neither the ranker nor the churn model scored while training.
+measured on the second group, which the ranker never trained on.
 
 Run from the project root:  python src/main.py
 """
@@ -24,7 +24,6 @@ from two_tower import train_two_tower, TwoTowerRetriever
 from retrieval import retrieve_topk, build_candidates
 from featurize import FEATURES, build_tables, derive
 from ranker import grade_matrix, training_frame, train_ranker
-from churn import build_frame, crossfit
 from pipeline import recommend, N_RETRIEVE
 from guardrails import heavy_user_mask, intra_list_diversity, iap_share
 from evaluate import to_run, to_qrels, evaluate_run, per_user, paired_bootstrap
@@ -39,13 +38,7 @@ train, test = ds["train"], ds["test"]
 n_users, n_items = len(ds["user_index"]), len(ds["item_index"])
 tick(f"users={n_users:,} items={n_items:,} train_pos={len(train):,} test_pos={len(test):,}")
 feats = build_item_features(ds["games"], ds["item_index"])
-
-# ---- churn model (cross-fitted scores for every player) --------------------------------------------------
-frame = build_frame(ds["items_df"], ds["games"])
-oof, churn_report = crossfit(frame)
 user_ids = sorted(ds["user_index"], key=ds["user_index"].get)
-churn = oof.reindex(user_ids).values  # NaN for players with < 10 lifetime hours
-tick(f"churn: {churn_report}")
 
 # ---- retrieval models -------------------------------------------------------------------------------------
 matrix = build_matrix(train, n_users, n_items)
@@ -58,7 +51,7 @@ tick("two-tower done")
 
 heavy, heavy_thr = heavy_user_mask(ds["recent_hours"])
 T = build_tables(train, n_users, n_items, feats, als.user_factors, als.item_factors,
-                 tt.all_user_vecs(), tt.item_vecs.numpy(), ds["recent_hours"], churn, matrix)
+                 tt.all_user_vecs(), tt.item_vecs.numpy(), ds["recent_hours"], matrix)
 derive(T, heavy_thr)
 
 # ---- user split, candidates, ranker -----------------------------------------------------------------------
@@ -137,13 +130,6 @@ for k_, v in guard.items():
     if isinstance(v, list):
         print(f"  {k_:<16} {v[0]:.4f} -> {v[1]:.4f}")
 
-ev_churn = churn[eval_users]
-mask = ~np.isnan(ev_churn)
-top_decile = ev_churn[mask] >= np.quantile(ev_churn[mask], 0.9)
-print(f"\nChurn model (cross-fitted, all {churn_report['players']:,} players with >= 10 h): "
-      f"AUC {churn_report['auc']:.3f} vs lifetime-hours-only {churn_report['auc_total_hours_only']:.3f}; "
-      f"PR-AUC {churn_report['pr_auc']:.3f} (base rate {churn_report['inactive_rate']:.3f})")
-
 inv = {v: k for k, v in ds["item_index"].items()}
 name = lambda i: ds["names"].get(inv[i], inv[i])
 examples = {name(int(i)): [name(j) for j, _ in similar_items(als, int(i), 5)] for i in np.argsort(-pop)[:3]}
@@ -163,7 +149,7 @@ with open(os.path.join(MODELS_DIR, "meta.json"), "w") as f:
 os.makedirs("outputs", exist_ok=True)
 with open("outputs/results.json", "w") as f:
     json.dump({"metrics": results, "ndcg10_bootstrap": comparisons, "guardrails": guard,
-               "churn": churn_report, "candidate_recall_first2000": cand_recall,
+               "candidate_recall_first2000": cand_recall,
                "feature_importance": {k: float(v) for k, v in imp.items()}, "cross_sell": examples,
                "n_users": n_users, "n_items": n_items, "eval_players": int(len(eval_users))}, f, indent=2)
 tick(f"saved artifacts to {MODELS_DIR}/ and outputs/results.json")

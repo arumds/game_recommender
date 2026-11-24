@@ -4,11 +4,11 @@ import numpy as np
 
 FEATURES = ["als_score", "tt_score", "als_rank", "tt_rank", "item_pop", "item_price", "item_year",
             "item_iap", "item_early", "item_n_genres", "item_has_meta", "user_n_pos", "user_recent_h",
-            "user_iap_share", "user_mean_price", "affinity", "price_gap", "churn_risk"]
+            "user_iap_share", "user_mean_price", "affinity", "price_gap"]
 
 
 def build_tables(train, n_users, n_items, feats, als_user, als_item, tt_user, tt_item,
-                 recent_hours, churn, matrix):
+                 recent_hours, matrix):
     """All per-user and per-item arrays needed after training. User stats come from TRAIN positives only."""
     import scipy.sparse as sp
     mh = feats["mh"]
@@ -28,7 +28,7 @@ def build_tables(train, n_users, n_items, feats, als_user, als_item, tt_user, tt
         "n_pos": n_pos, "profile": profile.astype(np.float32),
         "user_mean_price": np.asarray(m @ price).ravel() / denom,
         "user_iap_share": np.asarray(m @ iap).ravel() / denom,
-        "recent_hours": recent_hours.astype(np.float32), "churn": churn.astype(np.float32),
+        "recent_hours": recent_hours.astype(np.float32),
         "n_genres": np.array(feats["n_genres"]),
     }
 
@@ -62,7 +62,6 @@ def pair_features(users, cand, als_rank, tt_rank, T, chunk=2000):
             T["user_iap_share"][uu], T["user_mean_price"][uu],
             (T["profile"][uu] * T["mh_norm"][ii]).sum(1),
             T["price"][ii] - T["user_mean_price"][uu],
-            T["churn"][uu],
         ]).astype(np.float32)
         Xs.append(f)
         rows.append(r + s)

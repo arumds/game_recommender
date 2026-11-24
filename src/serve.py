@@ -69,11 +69,9 @@ def recommend_endpoint(req: Request):
     if u is None:
         return {"user_id": req.user_id, "source": "popularity_fallback", "items": _items(STATE["popular"][:req.k])}
     final, _ = recommend(np.array([u]), T, STATE["ranker"], STATE["seen"], k=req.k)
-    churn = float(T["churn"][u])
     return {
         "user_id": req.user_id, "source": "personalized",
         "heavy_recent_player": bool(T["heavy"][u]),
-        "inactivity_risk": None if np.isnan(churn) else round(churn, 3),
         "items": _items(final[0]),
     }
 

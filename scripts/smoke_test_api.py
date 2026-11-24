@@ -12,7 +12,7 @@ with TestClient(serve.app) as c:
     meta = json.load(open(os.path.join(serve.MODELS_DIR, "meta.json")))
     uid = meta["user_ids"][123]
     r = c.post("/recommend", json={"user_id": uid, "k": 5}).json()
-    print("personalized:", r["source"], "| heavy:", r["heavy_recent_player"], "| inactivity_risk:", r["inactivity_risk"])
+    print("personalized:", r["source"], "| heavy:", r["heavy_recent_player"])
     for it in r["items"]:
         print("  ", it["rank"], it["name"])
     cold = c.post("/recommend", json={"user_id": "no-such-player", "k": 3}).json()

@@ -1,4 +1,4 @@
-# UCSD Steam: Retrieval, Ranking, Churn, Guardrails and Serving
+# UCSD Steam: Retrieval, Ranking, Guardrails and Serving
 
 Personalization stack on the real UCSD Steam data (`australian_users_items`, `steam_games`).
 
@@ -6,7 +6,6 @@ Personalization stack on the real UCSD Steam data (`australian_users_items`, `st
 ALS (collaborative filtering) ─┐
                                ├─ merge ─ LightGBM LambdaMART ranker ─ guardrails ─ top-10  ── FastAPI
 Two-tower (PyTorch) ───────────┘
-Churn model (recent inactivity) ── feeds the ranker as a feature and the API as a field
 ```
 
 | Part | File | Library |
@@ -16,7 +15,6 @@ Churn model (recent inactivity) ── feeds the ranker as a feature and the API
 | Candidate merge + dot-product retrieval | `src/retrieval.py` | numpy |
 | Shared feature code (training and serving) | `src/featurize.py` | numpy |
 | LambdaMART re-ranker, graded labels by hours played | `src/ranker.py` | LightGBM |
-| Recent-inactivity model, cross-fitted | `src/churn.py` | LightGBM, scikit-learn |
 | Guardrails (no in-app-purchase games for intense recent players, diversity re-rank) | `src/guardrails.py` | numpy |
 | Metrics + paired bootstrap | `src/evaluate.py` | `ranx` |
 | API | `src/serve.py`, `Dockerfile` | FastAPI |
@@ -55,17 +53,13 @@ curl -X POST localhost:8000/recommend -H 'content-type: application/json' -d '{"
 | ALS | 0.247 | 0.248 | 0.129 |
 | Two-tower | 0.246 | 0.259 | 0.130 |
 | Rank fusion of ALS + two-tower (no learning) | 0.266 | 0.278 | 0.144 |
-| **LightGBM ranker** | **0.292** | **0.320** | **0.175** |
-| Ranker + guardrails | 0.274 | 0.293 | 0.153 |
+| **LightGBM ranker** | **0.293** | **0.321** | **0.175** |
+| Ranker + guardrails | 0.274 | 0.293 | 0.152 |
 
 Paired bootstrap on per-user NDCG@10 (95% CI): ranker beats ALS by +0.073 [+0.070, +0.075], the two-tower by
 +0.062, and the non-learned fusion by +0.042 [+0.040, +0.044]. Candidate-set recall is 0.61, the ceiling for any ranker.
 Guardrails cost 0.027 NDCG (CI excludes zero), cut in-app-purchase games in intense players' lists from 22.4% to
-0%, and raise list diversity from 0.62 to 0.76.
-
-**Churn (recent inactivity):** 65,154 players with >= 10 lifetime hours, 45% had no playtime in the last two weeks.
-Cross-fitted AUC 0.821 vs 0.805 for lifetime hours alone, so the model adds only a little over that one feature.
-The label is a proxy: one snapshot, no dates, so this is not true churn.
+0% (2,375 intense players in the evaluation group), and raise list diversity from 0.62 to 0.76.
 
 ## Limits
 - Offline accuracy on ownership data does not predict online lift. An A/B test is the real test.
