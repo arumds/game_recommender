@@ -1,0 +1,6 @@
+data/*.gz
+data/processed/
+outputs/
+models/
+__pycache__/
+*.pyc
