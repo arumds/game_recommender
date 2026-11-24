@@ -22,22 +22,110 @@ Two-tower (PyTorch) ───────────┘
 | API | `src/app.py`, `Dockerfile` | FastAPI |
 | Monitoring: latency percentiles, feature drift (PSI), model age, alerts | `src/monitoring.py`, `src/dashboard.html` | numpy |
 
-## Run
-Put `australian_users_items.json.gz` and `steam_games.json.gz` in `data/`.
+## Getting started
+
+Requires Python 3.11+ (training last tested with Python 3.13 on macOS, Apple Silicon). No GPU needed.
+
+### 1. Clone the repo
 ```bash
-pip install -r requirements.txt
-python src/main.py                    # ~6.5 min on 2 CPUs: trains, evaluates, writes models/ and outputs/results.json
-python scripts/smoke_test_api.py      # end-to-end API check
-python src/app.py                     # API on :8000; open http://127.0.0.1:8000/docs or /dashboard
+git clone https://github.com/arumds/game_recommender.git
+cd game_recommender
 ```
-Docker (serving only; train first so `models/` exists; the Dockerfile has not been built in the authoring environment):
+
+### 2. Create an environment and install dependencies
+Pick one of the options below. All of them install the same packages from `requirements.txt`.
+
+**Option A: venv** (built into Python, nothing extra to install)
+```bash
+python3 -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+**Option B: conda / Anaconda / Miniconda**
+```bash
+conda create -n steam-recsys python=3.11 -y
+conda activate steam-recsys
+pip install -r requirements.txt
+```
+
+**Option C: uv** (much faster installs; get it with `brew install uv` or `pip install uv`)
+```bash
+uv venv --python 3.11
+source .venv/bin/activate            # Windows: .venv\Scripts\activate
+uv pip install -r requirements.txt
+```
+
+**Serving only** (no training, so no torch or implicit): install `requirements-serve.txt` instead.
+This is what the Docker image uses. `models/` must already exist, copied from a machine that ran training.
+
+On macOS, LightGBM also needs OpenMP: `brew install libomp`.
+
+**In PyCharm / VS Code:** point the project interpreter at the environment you created
+(`.venv/bin/python`, or the conda env `steam-recsys`). The scripts resolve paths from the project root,
+so the run configuration's working directory doesn't matter.
+
+### 3. Download the data
+The data is not in the repo. Download the two files of the
+[UCSD Steam dataset](https://cseweb.ucsd.edu/~jmcauley/datasets.html#steam_data) (Version 1: Australian users) into `data/`:
+```bash
+mkdir -p data
+curl -L -o data/australian_users_items.json.gz https://mcauleylab.ucsd.edu/public_datasets/data/steam/australian_users_items.json.gz
+curl -L -o data/steam_games.json.gz            https://mcauleylab.ucsd.edu/public_datasets/data/steam/steam_games.json.gz
+```
+(74 MB and 2.7 MB.)
+
+### 4. Train and evaluate
+```bash
+python src/main.py
+```
+Takes about 4-7 minutes on a laptop CPU. The first run also caches the parsed data in `data/processed/`, which
+saves about 100 s on later runs. It prints the results table, then writes:
+- `models/`: everything the API needs (vectors, feature tables, ranker, drift baseline, model metadata)
+- `outputs/results.json`: metrics, bootstrap intervals, guardrail impact, feature importance
+
+Paths are resolved from the project root, so this works from any working directory (including an IDE run
+configuration). Set `STEAM_DATA_DIR` or `MODELS_DIR` to use other locations.
+
+### 5. Start the API
+```bash
+python src/app.py
+```
+Then open:
+- http://127.0.0.1:8000/docs: interactive API docs (try `/recommend` and `/similar` here)
+- http://127.0.0.1:8000/dashboard: live monitoring (latency, feature drift, model age, alerts)
+
+Example requests (player and game ids are in `models/meta.json`):
+```bash
+curl "http://127.0.0.1:8000/recommend?user_id=<steam_user_id>&k=10"
+curl "http://127.0.0.1:8000/recommend?user_id=<steam_user_id>&k=10&guardrails=false"   # compare without guardrails
+curl "http://127.0.0.1:8000/recommend?user_id=someone-new"                             # cold start: popularity list
+curl "http://127.0.0.1:8000/similar/730?k=5"                                           # games similar to CS:GO
+curl "http://127.0.0.1:8000/monitoring"
+```
+
+### 6. (Optional) Smoke test
+Runs the API in-process and checks every endpoint, including that heavy players never get in-app-purchase games:
+```bash
+pip install httpx2                   # needed by FastAPI's test client
+python scripts/smoke_test_api.py
+```
+
+### Docker (serving only)
+Train first so `models/` exists, then:
 ```bash
 docker build -t steam-reco-api .
 docker run -p 8000:8000 -v "$(pwd)/models:/app/models" steam-reco-api
 ```
-```bash
-curl -X POST localhost:8000/recommend -H 'content-type: application/json' -d '{"user_id":"<a steam id>","k":10}'
-```
+The image installs only `requirements-serve.txt` (no torch). It has not been built in the authoring environment yet.
+
+### Troubleshooting
+- `FileNotFoundError: data/...json.gz`: step 3 was skipped, or the files are not directly inside `data/`.
+- `Missing trained model artifact(s)` when starting the API: run `python src/main.py` first.
+- Crash (`SIGSEGV`) or `OMP: Error #15` on macOS: torch and LightGBM each load their own OpenMP runtime. `main.py`
+  avoids this by training the two-tower in a separate process (`src/two_tower_proc.py`); don't import torch
+  anywhere else in the main process.
 
 ## Data facts and choices (checked on the real files)
 - 88,310 lines but 70,912 distinct players: duplicate lines are merged (max playtime per player+game).
