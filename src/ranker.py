@@ -30,10 +30,12 @@ def train_ranker(X, y, group, rounds=150, seed=0):
     return lgb.train(params, ds, num_boost_round=rounds)
 
 
-def rank_candidates(ranker, users, cand, ar, tr, T, top=50):
-    """Score every candidate, return [n, top] item idx sorted by ranker score."""
+def rank_candidates(ranker, users, cand, ar, tr, T, top=50, return_features=False):
+    """Score every candidate, return [n, top] item idx sorted by ranker score.
+    With return_features=True also returns the ranker input X (the API records it for drift monitoring)."""
     X, r, c = pair_features(users, cand, ar, tr, T)
     scores = np.full(cand.shape, -np.inf, dtype=np.float64)
     scores[r, c] = ranker.predict(X)
     order = np.argsort(-scores, axis=1)[:, :top]
-    return np.take_along_axis(cand, order, 1)
+    ranked = np.take_along_axis(cand, order, 1)
+    return (ranked, X) if return_features else ranked
