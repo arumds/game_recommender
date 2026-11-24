@@ -2,6 +2,8 @@
 
 Personalization stack on the real UCSD Steam data (`australian_users_items`, `steam_games`).
 
+![Architecture](docs/architecture.svg)
+
 ```
 ALS (collaborative filtering) ─┐
                                ├─ merge ─ LightGBM LambdaMART ranker ─ guardrails ─ top-10  ── FastAPI
