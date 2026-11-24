@@ -10,4 +10,4 @@ RUN pip install --no-cache-dir -r requirements-serve.txt
 COPY src/ src/
 ENV PYTHONUNBUFFERED=1 MODELS_DIR=/app/models
 EXPOSE 8000
-CMD ["uvicorn", "serve:app", "--app-dir", "src", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app:app", "--app-dir", "src", "--host", "0.0.0.0", "--port", "8000"]
