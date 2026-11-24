@@ -120,13 +120,6 @@ docker run -p 8000:8000 -v "$(pwd)/models:/app/models" steam-reco-api
 ```
 The image installs only `requirements-serve.txt` (no torch). It has not been built in the authoring environment yet.
 
-### Troubleshooting
-- `FileNotFoundError: data/...json.gz`: step 3 was skipped, or the files are not directly inside `data/`.
-- `Missing trained model artifact(s)` when starting the API: run `python src/main.py` first.
-- Crash (`SIGSEGV`) or `OMP: Error #15` on macOS: torch and LightGBM each load their own OpenMP runtime. `main.py`
-  avoids this by training the two-tower in a separate process (`src/two_tower_proc.py`); don't import torch
-  anywhere else in the main process.
-
 ## Data facts and choices (checked on the real files)
 - 88,310 lines but 70,912 distinct players: duplicate lines are merged (max playtime per player+game).
 - 36% of owned games were never played, so **a positive is playtime >= 120 minutes**.
