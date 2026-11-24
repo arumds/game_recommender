@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 import numpy as np
 import scipy.sparse as sp
 import lightgbm as lgb
@@ -20,16 +21,19 @@ sys.path.insert(0, os.path.dirname(__file__))
 from data_loader import build_dataset
 from features import build_item_features
 from cf_als import build_matrix, train_als, similar_items
-from two_tower import train_two_tower, TwoTowerRetriever
+from two_tower_proc import vectors_in_subprocess  # two-tower trains in a child process (torch + LightGBM OpenMP clash on macOS)
 from retrieval import retrieve_topk, build_candidates
-from featurize import FEATURES, build_tables, derive
+from featurize import FEATURES, build_tables, derive, pair_features
 from ranker import grade_matrix, training_frame, train_ranker
 from pipeline import recommend, N_RETRIEVE
 from guardrails import heavy_user_mask, intra_list_diversity, iap_share
+from monitoring import build_feature_reference
 from evaluate import to_run, to_qrels, evaluate_run, per_user, paired_bootstrap
 
-DATA_DIR = os.environ.get("STEAM_DATA_DIR", "data")
-MODELS_DIR = os.environ.get("MODELS_DIR", "models")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project root, so the working directory does not matter
+DATA_DIR = os.environ.get("STEAM_DATA_DIR", os.path.join(ROOT, "data"))
+MODELS_DIR = os.environ.get("MODELS_DIR", os.path.join(ROOT, "models"))
+OUTPUTS_DIR = os.path.join(ROOT, "outputs")
 t0 = time.time()
 tick = lambda msg: print(f"[{time.time() - t0:5.0f}s] {msg}", flush=True)
 
@@ -45,13 +49,12 @@ matrix = build_matrix(train, n_users, n_items)
 seen = (matrix > 0).tocsr()
 als = train_als(matrix)
 tick("ALS done")
-model, losses, profiles = train_two_tower(train, n_users, n_items, feats)
-tt = TwoTowerRetriever(model, feats, profiles)
+tt_user_vecs, tt_item_vecs = vectors_in_subprocess(train, n_users, n_items, feats)
 tick("two-tower done")
 
 heavy, heavy_thr = heavy_user_mask(ds["recent_hours"])
 T = build_tables(train, n_users, n_items, feats, als.user_factors, als.item_factors,
-                 tt.all_user_vecs(), tt.item_vecs.numpy(), ds["recent_hours"], matrix)
+                 tt_user_vecs, tt_item_vecs, ds["recent_hours"], matrix)
 derive(T, heavy_thr)
 
 # ---- user split, candidates, ranker -----------------------------------------------------------------------
@@ -146,10 +149,22 @@ ranker.save_model(os.path.join(MODELS_DIR, "ranker.txt"))
 with open(os.path.join(MODELS_DIR, "meta.json"), "w") as f:
     json.dump({"user_ids": user_ids, "item_ids": [inv[i] for i in range(n_items)],
                "item_names": [name(i) for i in range(n_items)], "heavy_threshold": heavy_thr}, f)
-os.makedirs("outputs", exist_ok=True)
-with open("outputs/results.json", "w") as f:
+# drift reference = ranker inputs for held-out players' candidates, i.e. what the API computes per request
+ref_users = eval_users[:2000]
+X_ref, _, _ = pair_features(ref_users, cand[ref_users], ar[ref_users], tr[ref_users], T)
+with open(os.path.join(MODELS_DIR, "feature_reference.json"), "w") as f:
+    json.dump(build_feature_reference(X_ref, FEATURES, source=f"ranker inputs for {len(ref_users)} held-out players"),
+              f, indent=2)
+with open(os.path.join(MODELS_DIR, "model_metadata.json"), "w") as f:
+    json.dump({"trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+               "n_users": n_users, "n_items": n_items, "n_train_positives": int(len(train)),
+               "ndcg_at_10_ranker": results["ranker"]["ndcg@10"],
+               "ndcg_at_10_ranker_guardrails": results["ranker+guardrails"]["ndcg@10"],
+               "heavy_threshold_hours_2w": round(heavy_thr, 2)}, f, indent=2)
+os.makedirs(OUTPUTS_DIR, exist_ok=True)
+with open(os.path.join(OUTPUTS_DIR, "results.json"), "w") as f:
     json.dump({"metrics": results, "ndcg10_bootstrap": comparisons, "guardrails": guard,
                "candidate_recall_first2000": cand_recall,
                "feature_importance": {k: float(v) for k, v in imp.items()}, "cross_sell": examples,
                "n_users": n_users, "n_items": n_items, "eval_players": int(len(eval_users))}, f, indent=2)
-tick(f"saved artifacts to {MODELS_DIR}/ and outputs/results.json")
+tick(f"saved artifacts to {MODELS_DIR}/ and {OUTPUTS_DIR}/results.json")
