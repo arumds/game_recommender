@@ -111,6 +111,12 @@ class TwoTowerRetriever:
             self.item_vecs = model.item_vec(torch.arange(feats["mh"].shape[0]), torch.tensor(feats["mh"]),
                                             torch.tensor(feats["price"]), torch.tensor(feats["year"]))
 
+    def all_user_vecs(self):
+        u = torch.arange(len(self.pcnt))
+        prof = self.psum / self.pcnt.clamp(min=1).unsqueeze(1)
+        with torch.no_grad():
+            return self.model.user_vec(u, prof, self.bucket).numpy()
+
     def recommend(self, user_idx, seen_matrix, k, chunk=4096):
         out = []
         for s in range(0, len(user_idx), chunk):

@@ -30,6 +30,9 @@ def _read_literals(path):
 
 
 def load_items(path):
+    cache = os.path.join(os.path.dirname(path), "processed", "items.pkl")
+    if os.path.exists(cache):
+        return pd.read_pickle(cache)
     rows, names = [], {}
     for d in _read_literals(path):
         for it in d["items"]:
@@ -38,6 +41,8 @@ def load_items(path):
     df = pd.DataFrame(rows, columns=["user_id", "item_id", "playtime", "playtime_2w"])
     # merge duplicate user lines
     df = df.groupby(["user_id", "item_id"], as_index=False).max()
+    os.makedirs(os.path.dirname(cache), exist_ok=True)
+    pd.to_pickle((df, names), cache)  # parsing the 74 MB file takes ~100 s, so cache it
     return df, names
 
 
@@ -76,6 +81,6 @@ def build_dataset(data_dir="data", seed=0):
 
     return {
         "train": train, "test": test, "user_index": user_index, "item_index": item_index,
-        "games": games, "names": names,
+        "games": games, "names": names, "items_df": items_df,
         "recent_hours": recent_hours.reindex(user_ids).fillna(0.0).values,
     }

@@ -1,4 +1,10 @@
-"""Train and evaluate on UCSD Steam: popularity, ALS, two-tower, then the guardrail layer.
+"""Train and evaluate the whole stack on UCSD Steam, then save the artifacts the API loads.
+
+  retrieval: popularity, ALS, two-tower  ->  merge  ->  LightGBM ranker  ->  guardrails
+  plus: churn (recent-inactivity) model, cross-sell examples
+
+Players are split 70/30: the ranker learns from the first group's held-out games, and every number below is
+measured on the second group, which neither the ranker nor the churn model scored while training.
 
 Run from the project root:  python src/main.py
 """
@@ -7,109 +13,157 @@ import os
 import sys
 import time
 import numpy as np
+import scipy.sparse as sp
+import lightgbm as lgb
 
 sys.path.insert(0, os.path.dirname(__file__))
 from data_loader import build_dataset
 from features import build_item_features
-from cf_als import build_matrix, train_als, recommend_als, similar_items
+from cf_als import build_matrix, train_als, similar_items
 from two_tower import train_two_tower, TwoTowerRetriever
+from retrieval import retrieve_topk, build_candidates
+from featurize import FEATURES, build_tables, derive
+from ranker import grade_matrix, training_frame, train_ranker
+from churn import build_frame, crossfit
+from pipeline import recommend, N_RETRIEVE
+from guardrails import heavy_user_mask, intra_list_diversity, iap_share
 from evaluate import to_run, to_qrels, evaluate_run, per_user, paired_bootstrap
-from guardrails import heavy_user_mask, apply_guardrails, intra_list_diversity, iap_share
 
 DATA_DIR = os.environ.get("STEAM_DATA_DIR", "data")
-K = 20
+MODELS_DIR = os.environ.get("MODELS_DIR", "models")
 t0 = time.time()
+tick = lambda msg: print(f"[{time.time() - t0:5.0f}s] {msg}", flush=True)
 
 ds = build_dataset(DATA_DIR)
 train, test = ds["train"], ds["test"]
 n_users, n_items = len(ds["user_index"]), len(ds["item_index"])
-print(f"users={n_users:,} items={n_items:,} train_pos={len(train):,} test_pos={len(test):,}  ({time.time()-t0:.0f}s)")
-
+tick(f"users={n_users:,} items={n_items:,} train_pos={len(train):,} test_pos={len(test):,}")
 feats = build_item_features(ds["games"], ds["item_index"])
-print(f"item metadata coverage: {feats['mh'][:, -1].mean():.1%}")
 
-eval_users = np.arange(n_users)
-qrels = to_qrels(test, eval_users)
+# ---- churn model (cross-fitted scores for every player) --------------------------------------------------
+frame = build_frame(ds["items_df"], ds["games"])
+oof, churn_report = crossfit(frame)
+user_ids = sorted(ds["user_index"], key=ds["user_index"].get)
+churn = oof.reindex(user_ids).values  # NaN for players with < 10 lifetime hours
+tick(f"churn: {churn_report}")
+
+# ---- retrieval models -------------------------------------------------------------------------------------
 matrix = build_matrix(train, n_users, n_items)
-
-# 1) Popularity
-pop = np.asarray((matrix > 0).sum(0)).ravel().astype(float)
-# most-liked games, skipping what each user already liked
-def pop_for_users(chunk=8192):
-    out = []
-    order = np.argsort(-pop)
-    for s in range(0, n_users, chunk):
-        ids = eval_users[s:s + chunk]
-        seen = matrix[ids].toarray() > 0
-        ranked = np.where(seen[:, order], -1, 0)  # -1 = seen
-        recs = []
-        for r in range(len(ids)):
-            recs.append(order[ranked[r] == 0][:K])
-        out.append(np.vstack(recs))
-    return np.vstack(out)
-pop_recs = pop_for_users()
-
-# 2) ALS
+seen = (matrix > 0).tocsr()
 als = train_als(matrix)
-als_recs = recommend_als(als, matrix, eval_users, K)
-print(f"ALS done ({time.time()-t0:.0f}s)")
-
-# 3) Two-tower
+tick("ALS done")
 model, losses, profiles = train_two_tower(train, n_users, n_items, feats)
 tt = TwoTowerRetriever(model, feats, profiles)
-tt_recs = tt.recommend(eval_users, matrix, K)
-print(f"two-tower done ({time.time()-t0:.0f}s)")
+tick("two-tower done")
 
-runs = {n: to_run(r, eval_users, K) for n, r in
-        [("popularity", pop_recs), ("als", als_recs), ("two_tower", tt_recs)]}
-results = {n: evaluate_run(r, qrels) for n, r in runs.items()}
-print(f"\n{'model':<12}" + "".join(f"{m:>12}" for m in results["als"]))
+heavy, heavy_thr = heavy_user_mask(ds["recent_hours"])
+T = build_tables(train, n_users, n_items, feats, als.user_factors, als.item_factors,
+                 tt.all_user_vecs(), tt.item_vecs.numpy(), ds["recent_hours"], churn, matrix)
+derive(T, heavy_thr)
+
+# ---- user split, candidates, ranker -----------------------------------------------------------------------
+rng = np.random.default_rng(0)
+perm = rng.permutation(n_users)
+cut = int(0.7 * n_users)
+rank_users, eval_users = np.sort(perm[:cut]), np.sort(perm[cut:])
+
+als_top = retrieve_topk(T["als_user"], T["als_item"], seen, N_RETRIEVE)
+tt_top = retrieve_topk(T["tt_user"], T["tt_item"], seen, N_RETRIEVE)
+cand, ar, tr = build_candidates(als_top, tt_top)
+tick(f"candidates built (avg {np.mean((cand >= 0).sum(1)):.0f} per player)")
+
+grades = grade_matrix(test, n_users, n_items)
+X, y, group = training_frame(rank_users, cand[rank_users], ar[rank_users], tr[rank_users], T, grades)
+tick(f"ranker training rows={len(X):,}, positive rate={np.mean(y > 0):.3%}")
+ranker = train_ranker(X, y, group)
+imp = dict(zip(FEATURES, ranker.feature_importance(importance_type="gain")))
+tick("ranker done")
+print("feature importance (gain share):")
+tot = sum(imp.values())
+for f, v in sorted(imp.items(), key=lambda kv: -kv[1]):
+    print(f"  {f:<16}{v / tot:7.1%}")
+
+# ---- evaluation on held-out players ----------------------------------------------------------------------
+qrels = to_qrels(test, eval_users)
+K = 10
+pop = T["pop"]
+order = np.argsort(-pop)
+pop_recs = np.vstack([order[~(seen[u].toarray().ravel() > 0)[order]][:K] for u in eval_users])
+als_recs, tt_recs = als_top[eval_users, :K], tt_top[eval_users, :K]
+# non-learned fusion baseline: reciprocal-rank fusion of the two lists
+rrf_recs = []
+for u in eval_users:
+    sc = {}
+    for lst in (als_top[u], tt_top[u]):
+        for r, i in enumerate(lst):
+            sc[int(i)] = sc.get(int(i), 0.0) + 1.0 / (60 + r)
+    rrf_recs.append(sorted(sc, key=sc.get, reverse=True)[:K])
+rrf_recs = np.array(rrf_recs)
+
+final, ranked = recommend(eval_users, T, ranker, seen, k=K)
+recs = {"popularity": pop_recs, "als": als_recs, "two_tower": tt_recs, "rrf_als_tt": rrf_recs,
+        "ranker": ranked[:, :K], "ranker+guardrails": final}
+runs = {n: to_run(r, eval_users, K) for n, r in recs.items()}
+metrics = ["recall@10", "ndcg@10", "map@10"]
+results = {n: evaluate_run(r, qrels, metrics) for n, r in runs.items()}
+print(f"\nHeld-out players: {len(eval_users):,}  (top-{K})")
+print(f"{'model':<20}" + "".join(f"{m:>12}" for m in metrics))
 for n, res in results.items():
-    print(f"{n:<12}" + "".join(f"{v:>12.4f}" for v in res.values()))
+    print(f"{n:<20}" + "".join(f"{res[m]:>12.4f}" for m in metrics))
 
-print("\nPaired bootstrap on per-user NDCG@10 (mean diff, 95% CI):")
+cand_recall = np.mean([len(set(cand[u][cand[u] >= 0]) & set(test.loc[test["u"] == u, "i"])) /
+                       max(1, (test["u"] == u).sum()) for u in eval_users[:2000]])
+print(f"candidate-set recall (ceiling for any ranker, first 2000 players): {cand_recall:.3f}")
+
 nd = {n: per_user(r, qrels) for n, r in runs.items()}
+print("\nPaired bootstrap on per-user NDCG@10 (mean diff, 95% CI):")
 comparisons = {}
-for a, b in [("als", "popularity"), ("two_tower", "popularity"), ("als", "two_tower")]:
+for a, b in [("ranker", "als"), ("ranker", "two_tower"), ("ranker", "rrf_als_tt"), ("two_tower", "als"),
+             ("ranker+guardrails", "ranker")]:
     d, lo, hi = paired_bootstrap(nd[a], nd[b])
     verdict = "significant" if lo > 0 or hi < 0 else "not distinguishable from zero"
     comparisons[f"{a}_vs_{b}"] = {"diff": d, "ci95": [lo, hi]}
     print(f"  {a} - {b}: {d:+.4f}  [{lo:+.4f}, {hi:+.4f}]  {verdict}")
 
-# 4) Guardrails on ALS top-50 candidates
-cand = recommend_als(als, matrix, eval_users, 50)
-heavy, thr = heavy_user_mask(ds["recent_hours"])
-before = cand[:, :10]
-after = apply_guardrails(cand, heavy, feats["iap"], feats["mh"], k=10)
-rb, ra = to_run(before, eval_users, 10), to_run(after, eval_users, 10)
-gm = ["recall@10", "ndcg@10"]
-mb, ma = evaluate_run(rb, qrels, gm), evaluate_run(ra, qrels, gm)
+hv = heavy[eval_users]
 guard = {
-    "heavy_users": int(heavy.sum()), "heavy_threshold_hours_2w": thr,
-    "recall@10": [mb["recall@10"], ma["recall@10"]], "ndcg@10": [mb["ndcg@10"], ma["ndcg@10"]],
-    "diversity": [intra_list_diversity(before, feats["mh"]), intra_list_diversity(after, feats["mh"])],
-    "iap_share_heavy": [iap_share(before[heavy], feats["iap"]), iap_share(after[heavy], feats["iap"])],
-    "iap_share_all": [iap_share(before, feats["iap"]), iap_share(after, feats["iap"])],
+    "heavy_players_eval": int(hv.sum()), "heavy_threshold_hours_2w": heavy_thr,
+    "diversity": [intra_list_diversity(ranked[:, :K], T["mh"]), intra_list_diversity(final, T["mh"])],
+    "iap_share_heavy": [iap_share(ranked[hv, :K], T["iap"]), iap_share(final[hv], T["iap"])],
+    "iap_share_all": [iap_share(ranked[:, :K], T["iap"]), iap_share(final, T["iap"])],
 }
-print(f"\nGuardrails (before -> after), heavy users={guard['heavy_users']:,} (>= {thr:.1f} h in last 2 weeks):")
+print("\nGuardrails, ranker output before -> after:")
 for k_, v in guard.items():
     if isinstance(v, list):
         print(f"  {k_:<16} {v[0]:.4f} -> {v[1]:.4f}")
 
-# 5) Cross-sell examples from ALS item vectors
+ev_churn = churn[eval_users]
+mask = ~np.isnan(ev_churn)
+top_decile = ev_churn[mask] >= np.quantile(ev_churn[mask], 0.9)
+print(f"\nChurn model (cross-fitted, all {churn_report['players']:,} players with >= 10 h): "
+      f"AUC {churn_report['auc']:.3f} vs lifetime-hours-only {churn_report['auc_total_hours_only']:.3f}; "
+      f"PR-AUC {churn_report['pr_auc']:.3f} (base rate {churn_report['inactive_rate']:.3f})")
+
 inv = {v: k for k, v in ds["item_index"].items()}
 name = lambda i: ds["names"].get(inv[i], inv[i])
-print("\nCross-sell examples (ALS item similarity):")
-examples = {}
-popular = np.argsort(-pop)[:3]
-for it in popular:
-    sims = [name(j) for j, _ in similar_items(als, int(it), 5)]
-    examples[name(int(it))] = sims
-    print(f"  {name(int(it))}: {sims}")
+examples = {name(int(i)): [name(j) for j, _ in similar_items(als, int(i), 5)] for i in np.argsort(-pop)[:3]}
+print("\nCross-sell examples:")
+for k_, v in examples.items():
+    print(f"  {k_}: {v}")
 
+# ---- save artifacts for the API ---------------------------------------------------------------------------
+os.makedirs(MODELS_DIR, exist_ok=True)
+skip = {"mh_norm", "sim", "heavy"}  # derived at load time
+np.savez_compressed(os.path.join(MODELS_DIR, "tables.npz"), **{k: v for k, v in T.items() if k not in skip})
+sp.save_npz(os.path.join(MODELS_DIR, "seen.npz"), seen)
+ranker.save_model(os.path.join(MODELS_DIR, "ranker.txt"))
+with open(os.path.join(MODELS_DIR, "meta.json"), "w") as f:
+    json.dump({"user_ids": user_ids, "item_ids": [inv[i] for i in range(n_items)],
+               "item_names": [name(i) for i in range(n_items)], "heavy_threshold": heavy_thr}, f)
 os.makedirs("outputs", exist_ok=True)
 with open("outputs/results.json", "w") as f:
     json.dump({"metrics": results, "ndcg10_bootstrap": comparisons, "guardrails": guard,
-               "cross_sell": examples, "n_users": n_users, "n_items": n_items,
-               "train_positives": len(train), "test_positives": len(test)}, f, indent=2)
-print(f"\nSaved outputs/results.json ({time.time()-t0:.0f}s total)")
+               "churn": churn_report, "candidate_recall_first2000": cand_recall,
+               "feature_importance": {k: float(v) for k, v in imp.items()}, "cross_sell": examples,
+               "n_users": n_users, "n_items": n_items, "eval_players": int(len(eval_users))}, f, indent=2)
+tick(f"saved artifacts to {MODELS_DIR}/ and outputs/results.json")

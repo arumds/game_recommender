@@ -16,14 +16,15 @@ def heavy_user_mask(recent_hours, quantile=0.75):
     return recent_hours >= thr, float(thr)
 
 
-def _cosine_matrix(mh):
+def cosine_matrix(mh):
     x = mh / np.maximum(np.linalg.norm(mh, axis=1, keepdims=True), 1e-9)
     return x @ x.T
 
 
-def apply_guardrails(candidates, heavy, iap, mh, k=10, lam=0.7):
+def apply_guardrails(candidates, heavy, iap, mh, k=10, lam=0.7, sim=None):
     """candidates: [n, C] item idx in rank order. Returns [n, k]."""
-    sim = _cosine_matrix(mh)
+    if sim is None:
+        sim = cosine_matrix(mh)  # pass a precomputed matrix when calling per request
     n, c = candidates.shape
     rel_base = 1.0 - np.arange(c) / c
     out = np.zeros((n, k), dtype=np.int64)
@@ -48,7 +49,7 @@ def apply_guardrails(candidates, heavy, iap, mh, k=10, lam=0.7):
 
 
 def intra_list_diversity(recs, mh):
-    sim = _cosine_matrix(mh)
+    sim = cosine_matrix(mh)
     vals = []
     for row in recs:
         s = sim[np.ix_(row, row)]
