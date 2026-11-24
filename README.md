@@ -17,7 +17,8 @@ Two-tower (PyTorch) ───────────┘
 | LambdaMART re-ranker, graded labels by hours played | `src/ranker.py` | LightGBM |
 | Guardrails (no in-app-purchase games for intense recent players, diversity re-rank) | `src/guardrails.py` | numpy |
 | Metrics + paired bootstrap | `src/evaluate.py` | `ranx` |
-| API | `src/serve.py`, `Dockerfile` | FastAPI |
+| API | `src/app.py`, `Dockerfile` | FastAPI |
+| Monitoring: latency percentiles, feature drift (PSI), model age, alerts | `src/monitoring.py`, `src/dashboard.html` | numpy |
 
 ## Run
 Put `australian_users_items.json.gz` and `steam_games.json.gz` in `data/`.
@@ -25,7 +26,7 @@ Put `australian_users_items.json.gz` and `steam_games.json.gz` in `data/`.
 pip install -r requirements.txt
 python src/main.py                    # ~6.5 min on 2 CPUs: trains, evaluates, writes models/ and outputs/results.json
 python scripts/smoke_test_api.py      # end-to-end API check
-uvicorn serve:app --app-dir src --port 8000     # then open http://127.0.0.1:8000/docs
+python src/app.py                     # API on :8000; open http://127.0.0.1:8000/docs or /dashboard
 ```
 Docker (serving only; train first so `models/` exists; the Dockerfile has not been built in the authoring environment):
 ```bash
