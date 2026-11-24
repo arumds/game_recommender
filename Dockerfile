@@ -1,4 +1,3 @@
-# Serving image only: no training dependencies (no torch, implicit, ranx).
 # Train first (python src/main.py) so models/ exists, then mount it at run time:
 #   docker build -t steam-reco-api .
 #   docker run -p 8000:8000 -v "$(pwd)/models:/app/models" steam-reco-api
