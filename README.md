@@ -116,9 +116,15 @@ python scripts/smoke_test_api.py
 Train first so `models/` exists, then:
 ```bash
 docker build -t steam-reco-api .
-docker run -p 8000:8000 -v "$(pwd)/models:/app/models" steam-reco-api
+docker run -d --name steam-reco -p 8000:8000 -v "$(pwd)/models:/app/models:ro" steam-reco-api
 ```
-The image installs only `requirements-serve.txt` (no torch). It has not been built in the authoring environment yet.
+Then open http://localhost:8000/docs (Swagger UI) or http://localhost:8000/dashboard. Stop it with
+`docker rm -f steam-reco`.
+
+The image installs only `requirements-serve.txt` (no torch) and is about 3 ms per `/recommend` request.
+Models are mounted read-only at run time rather than baked into the image, so retraining doesn't need a rebuild.
+On macOS, the first start can hang at "Loading trained artifacts..." until you allow Docker to access the folder
+(check for a macOS permission prompt), then `docker restart steam-reco`.
 
 ## Results (one run, seed 0; top-10, 13,738 held-out players; `outputs/results.json`)
 | Model | Recall@10 | NDCG@10 | MAP@10 |
